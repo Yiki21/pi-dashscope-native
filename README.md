@@ -4,8 +4,24 @@ Pi provider for Alibaba Cloud's native DashScope Qwen API.
 
 ## Installation
 
+Install from npm:
+
 ```bash
-pi install git:github.com/Yiki21/pi-dashscope-native@v0.2.0
+pi install npm:pi-dashscope-native
+```
+
+To pin a specific release:
+
+```bash
+pi install npm:pi-dashscope-native@0.2.1
+```
+
+The package is listed in [Pi Packages](https://pi.dev/packages/pi-dashscope-native).
+
+You can also install the tagged GitHub release:
+
+```bash
+pi install git:github.com/Yiki21/pi-dashscope-native@v0.2.1
 ```
 
 To track the repository's default branch instead of a release tag:
