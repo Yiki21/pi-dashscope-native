@@ -1,0 +1,49 @@
+{
+  "name": "pi-dashscope-native",
+  "version": "0.2.0",
+  "description": "Native Alibaba Cloud DashScope Qwen provider for Pi",
+  "type": "module",
+  "license": "MIT",
+  "author": "Yiki21",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Yiki21/pi-dashscope-native.git"
+  },
+  "homepage": "https://github.com/Yiki21/pi-dashscope-native#readme",
+  "bugs": {
+    "url": "https://github.com/Yiki21/pi-dashscope-native/issues"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "pack:check": "npm pack --dry-run"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-provider",
+    "dashscope",
+    "qwen",
+    "alibaba"
+  ]
+}
