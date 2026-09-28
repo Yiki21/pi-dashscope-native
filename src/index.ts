@@ -11,6 +11,7 @@ import {
   type StopReason,
   type TextContent,
   type ThinkingContent,
+  type Tool,
   type ToolCall,
   calculateCost,
   createAssistantMessageEventStream,
@@ -67,7 +68,7 @@ export const QWEN_MODELS: QwenModelConfig[] = [
   {
     id: "qwen3.8-2.4t-a95b",
     name: "Qwen 3.8 2.4T A95B",
-    nativeApi: "text",
+    nativeApi: "multimodal",
     input: ["text"],
     contextWindow: MILLION_TOKENS,
     maxTokens: MAX_OUTPUT_TOKENS,
@@ -125,7 +126,7 @@ export const QWEN_MODELS: QwenModelConfig[] = [
     nativeApi: "text",
     input: ["text"],
     contextWindow: MILLION_TOKENS,
-    maxTokens: MAX_OUTPUT_TOKENS,
+    maxTokens: 65_536,
     maxThinkingTokens: 262_144,
     forcedThinking: true,
   },
@@ -135,7 +136,7 @@ export const QWEN_MODELS: QwenModelConfig[] = [
     nativeApi: "text",
     input: ["text"],
     contextWindow: MILLION_TOKENS,
-    maxTokens: MAX_OUTPUT_TOKENS,
+    maxTokens: 65_536,
     maxThinkingTokens: 262_144,
     forcedThinking: true,
   },
@@ -299,14 +300,18 @@ function dataUri(image: ImageContent): string {
     : `data:${image.mimeType};base64,${image.data}`;
 }
 
-function textParts(content: Array<TextContent | ImageContent>): string {
+function textParts(content: string | Array<TextContent | ImageContent>): string {
+  if (typeof content === "string") return content;
   return content
     .filter((part): part is TextContent => part.type === "text")
     .map((part) => part.text)
     .join("\n");
 }
 
-function multimodalParts(content: Array<TextContent | ImageContent>): NativeContentPart[] {
+function multimodalParts(
+  content: string | Array<TextContent | ImageContent>,
+): NativeContentPart[] {
+  if (typeof content === "string") return content ? [{ text: content }] : [];
   return content.map((part) =>
     part.type === "text" ? { text: part.text } : { image: dataUri(part) },
   );
@@ -340,29 +345,34 @@ function assistantToolCalls(message: AssistantMessage): Array<Record<string, unk
     }));
 }
 
-function convertMessage(message: Message, nativeApi: NativeApiKind): Record<string, unknown> {
-  const multimodal = nativeApi === "multimodal";
+type RawContent = string | Array<TextContent | ImageContent>;
 
-  if (message.role === "user") {
-    if (typeof message.content === "string") {
-      return {
-        role: "user",
-        content: multimodal ? [{ text: message.content }] : message.content,
-      };
-    }
-    if (!multimodal && message.content.some((part) => part.type === "image")) {
-      throw new Error("The selected Qwen model accepts text input only");
-    }
-    return {
-      role: "user",
-      content: multimodal ? multimodalParts(message.content) : textParts(message.content),
-    };
-  }
+function toRawContent(
+  content: string | Array<TextContent | ImageContent | ThinkingContent | ToolCall>,
+): RawContent {
+  if (typeof content === "string") return content;
+  return content.filter(
+    (part): part is TextContent | ImageContent =>
+      part.type === "text" || part.type === "image",
+  );
+}
+
+function convertMessage(
+  message: {
+    role: string;
+    content: string | Array<TextContent | ImageContent | ThinkingContent | ToolCall>;
+    toolCallId?: string;
+  },
+  nativeApi: NativeApiKind,
+): Record<string, unknown> {
+  const multimodal = nativeApi === "multimodal";
+  const content = toRawContent(message.content);
 
   if (message.role === "assistant") {
-    const text = assistantText(message);
-    const thinking = assistantThinking(message);
-    const toolCalls = assistantToolCalls(message);
+    const assistant = message as unknown as AssistantMessage;
+    const text = assistantText(assistant);
+    const thinking = assistantThinking(assistant);
+    const toolCalls = assistantToolCalls(assistant);
     return {
       role: "assistant",
       content: multimodal ? (text ? [{ text }] : []) : text,
@@ -371,31 +381,113 @@ function convertMessage(message: Message, nativeApi: NativeApiKind): Record<stri
     };
   }
 
-  if (!multimodal && message.content.some((part) => part.type === "image")) {
-    throw new Error("The selected Qwen model cannot receive image tool results");
+  if (message.role === "toolResult") {
+    if (!multimodal && Array.isArray(content) && content.some((part) => part.type === "image")) {
+      throw new Error("The selected Qwen model cannot receive image tool results");
+    }
+    return {
+      role: "tool",
+      tool_call_id: message.toolCallId,
+      content: multimodal ? multimodalParts(content) : textParts(content),
+    };
+  }
+
+  if (message.role !== "user" && message.role !== "system") {
+    throw new Error(`Unsupported message role for DashScope: ${message.role}`);
+  }
+  if (!multimodal && Array.isArray(content) && content.some((part) => part.type === "image")) {
+    throw new Error("The selected Qwen model accepts text input only");
   }
   return {
-    role: "tool",
-    tool_call_id: message.toolCallId,
-    content: multimodal ? multimodalParts(message.content) : textParts(message.content),
+    role: message.role,
+    content: multimodal ? multimodalParts(content) : textParts(content),
   };
 }
 
-function convertMessages(context: Context, nativeApi: NativeApiKind): Array<Record<string, unknown>> {
-  const messages: Array<Record<string, unknown>> = [];
-  if (context.systemPrompt) {
-    messages.push({
-      role: "system",
-      content: nativeApi === "multimodal" ? [{ text: context.systemPrompt }] : context.systemPrompt,
-    });
-  }
-  messages.push(...context.messages.map((message) => convertMessage(message, nativeApi)));
-  return messages;
+interface NormalizedTranscript {
+  messages: Array<Record<string, unknown>>;
+  tools: Tool[];
 }
 
-function convertTools(context: Context): Array<Record<string, unknown>> | undefined {
-  if (!context.tools?.length) return undefined;
-  return context.tools.map((tool) => ({
+/**
+ * Pi hands a custom provider a transcript whose prompt and tool declarations live
+ * in `system` messages rather than in `Context.systemPrompt` / `Context.tools`.
+ * Resolve both shapes: collect the prompt and tool deltas, then emit one leading
+ * system message plus the conversation.
+ */
+function normalizeTranscript(context: Context, nativeApi: NativeApiKind): NormalizedTranscript {
+  const raw = context as unknown as { messages?: unknown[]; systemPrompt?: string; tools?: Tool[] };
+  const incoming = raw.messages ?? [];
+
+  const promptTexts: string[] = [];
+  if (typeof context.systemPrompt === "string" && context.systemPrompt.length > 0) {
+    promptTexts.push(context.systemPrompt);
+  }
+
+  const sections = new Map<string, string>();
+  const tools = new Map<string, Tool>();
+  for (const tool of raw.tools ?? []) tools.set(tool.name, tool);
+
+  const conversation: Array<{
+    role: string;
+    content: string | Array<TextContent | ImageContent | ThinkingContent | ToolCall>;
+    toolCallId?: string;
+  }> = [];
+
+  for (const entry of incoming) {
+    const message = entry as Record<string, unknown>;
+    const role = typeof message.role === "string" ? message.role : undefined;
+    if (!role) continue;
+
+    if (role === "system") {
+      const content = message.content as string | TextContent[] | undefined;
+      const text = content === undefined
+        ? ""
+        : typeof content === "string"
+          ? content
+          : content.filter((part): part is TextContent => part.type === "text")
+            .map((part) => part.text)
+            .join("\n");
+      if (text.length > 0) promptTexts.push(text);
+
+      for (const [name, value] of Object.entries(
+        (message.sections as Record<string, string | null> | undefined) ?? {},
+      )) {
+        if (value === null) sections.delete(name);
+        else sections.set(name, value);
+      }
+      for (const tool of (message.toolsAdded as Tool[] | undefined) ?? []) {
+        tools.set(tool.name, tool);
+      }
+      for (const tool of (message.toolsRemoved as Array<{ name: string }> | undefined) ?? []) {
+        tools.delete(tool.name);
+      }
+      continue;
+    }
+
+    conversation.push({
+      role,
+      content: message.content as string | Array<TextContent | ImageContent>,
+      ...(typeof message.toolCallId === "string" ? { toolCallId: message.toolCallId } : {}),
+    });
+  }
+
+  const messages: Array<Record<string, unknown>> = [];
+  const prompt = [...promptTexts, ...sections.values()].filter((part) => part.length > 0).join("\n\n");
+  if (prompt.length > 0) {
+    messages.push({
+      role: "system",
+      content: nativeApi === "multimodal" ? [{ text: prompt }] : prompt,
+    });
+  }
+  messages.push(...conversation.map((message) => convertMessage(message, nativeApi)));
+
+  return { messages, tools: [...tools.values()] };
+}
+
+function convertTools(tools: Tool[]): Array<Record<string, unknown>> | undefined {
+  if (tools.length === 0) return undefined;
+  return tools.map((tool) => ({
     type: "function",
     function: {
       name: tool.name,
@@ -434,7 +526,8 @@ async function buildPayload(
 ): Promise<Record<string, unknown>> {
   const budget = thinkingBudget(config, options);
   const thinkingEnabled = config.forcedThinking || options?.reasoning !== undefined;
-  const tools = convertTools(context);
+  const transcript = normalizeTranscript(context, config.nativeApi);
+  const tools = convertTools(transcript.tools);
   const parameters: Record<string, unknown> = {
     result_format: "message",
     incremental_output: true,
@@ -450,7 +543,7 @@ async function buildPayload(
   };
   const payload: Record<string, unknown> = {
     model: model.id,
-    input: { messages: convertMessages(context, config.nativeApi) },
+    input: { messages: transcript.messages },
     parameters,
   };
   return (await options?.onPayload?.(payload, model)) as Record<string, unknown> | undefined ?? payload;
@@ -533,7 +626,8 @@ async function* nativeChunks(body: ReadableStream<Uint8Array>): AsyncGenerator<N
 
 function nativeText(content: NativeMessage["content"]): string {
   if (typeof content === "string") return content;
-  return content?.map((part) => part.text ?? "").join("") ?? "";
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => part.text ?? "").join("");
 }
 
 function stopReason(reason: string | null | undefined): StopReason | undefined {

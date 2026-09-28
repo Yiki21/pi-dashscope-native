@@ -94,9 +94,20 @@ The provider registers every Qwen 3.7 and 3.8 model currently listed by Alibaba 
 - `qwen3.7-flash`
 - `qwen3.7-flash-2026-07-15`
 
-All models use a 1M-token context window and a 131072-token maximum output. The `-us` model IDs use the Virginia DashScope endpoint and require `DASHSCOPE_US_API_KEY`; the other IDs use the Beijing endpoint and the Provider's configured key. Pi exposes image input only for models whose official model card includes image and video input. Pi does not currently expose video as a provider input type.
+All models use a 1M-token context window. `qwen3.7-max-preview` and `qwen3.7-max-2026-05-17` cap output at 65536 tokens; every other model allows 131072. The `-us` model IDs use the Virginia DashScope endpoint and require `DASHSCOPE_US_API_KEY`; the other IDs use the Beijing endpoint and the Provider's configured key. Pi exposes image input only for models whose official model card includes image and video input. Pi does not currently expose video as a provider input type.
 
 `qwen3.7-max-preview` and `qwen3.7-max-2026-05-17` are thinking-only models. The provider hides Pi's `off` thinking level for them.
+
+### Endpoints
+
+DashScope exposes two service paths, and a given model is served by exactly one of them. The provider picks the path from each model's `nativeApi`, which is pinned to the endpoint the model actually answers on:
+
+| Path | Models |
+| --- | --- |
+| `multimodal-generation/generation` | all Qwen 3.8 models, `qwen3.7-plus*`, `qwen3.7-flash*`, `qwen3.7-max-2026-06-08` |
+| `text-generation/generation` | `qwen3.7-max`, `qwen3.7-max-us`, `qwen3.7-max-2026-05-20`, `qwen3.7-max-preview`, `qwen3.7-max-2026-05-17` |
+
+Calling the wrong path answers with `InvalidParameter: url error, please check url`, not with a message about the model.
 
 ## Thinking levels
 
@@ -112,6 +123,8 @@ Pi thinking levels map to native `enable_thinking` and `thinking_budget` paramet
 | `max` | Model maximum, up to 262144 |
 
 Custom Pi thinking budgets override these defaults and are clamped to each model's documented limit.
+
+A transcript's prompt and tool declarations are rebuilt into one leading `system` message per request: Pi delivers both through the transcript rather than through `Context.systemPrompt` and `Context.tools`, and tool declarations arrive as `toolsAdded` / `toolsRemoved` deltas on `system` messages.
 
 ## Usage
 
