@@ -145,6 +145,18 @@ The Provider supports:
 
 Model costs remain zero in Pi because the configured Model Studio prices are denominated in CNY while Pi's cost display assumes USD.
 
+### Model info in the status bar
+
+Set `PI_DASHSCOPE_SHOW_MODEL_INFO=true` to show which Qwen model served the last reply in Pi's status bar:
+
+```bash
+PI_DASHSCOPE_SHOW_MODEL_INFO=true pi --provider alibaba-qwen-dashscope-native --model qwen3.8-max
+```
+
+This is display-only. An earlier version appended the same information to the reply text itself, which put it into the session record, so it was replayed on later turns as if the model had written it. It is now off by default and never touches message content.
+
+`usage.json` is written atomically (temp file plus rename), so a crash or two sessions writing at once can no longer truncate the history. A write that fails is reported once on stderr instead of being dropped silently.
+
 ## Endpoint override
 
 Override `baseUrl` in `models.json` to use a workspace or another Model Studio region. The value must end at `/api/v1`; the provider appends the correct text or multimodal service path.

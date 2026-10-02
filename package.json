@@ -1,6 +1,6 @@
 {
   "name": "pi-dashscope-native",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Native Alibaba Cloud DashScope Qwen provider for Pi",
   "type": "module",
   "license": "MIT",
@@ -20,6 +20,7 @@
   ],
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
+    "test": "npm run typecheck && node --experimental-strip-types --test tests/",
     "pack:check": "npm pack --dry-run"
   },
   "pi": {
@@ -28,12 +29,14 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-ai": ">=0.80.9",
+    "@earendil-works/pi-coding-agent": ">=0.80.9"
   },
   "devDependencies": {
-    "@types/node": "^26.4.0",
-    "typescript": "^7.0.2"
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-coding-agent": "1.0.0",
+    "@types/node": "^24.10.0",
+    "typescript": "^5.9.3"
   },
   "engines": {
     "node": ">=20"

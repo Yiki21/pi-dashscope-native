@@ -5,6 +5,7 @@ import {
   type AssistantMessageEventStream,
   type Context,
   type ImageContent,
+  type JsonObject,
   type Message,
   type Model,
   type SimpleStreamOptions,
@@ -248,7 +249,11 @@ interface ToolAccumulator {
 }
 
 function loadIntegrationConfig(): IntegrationConfig {
-  const showModelInfo = process.env.PI_DASHSCOPE_SHOW_MODEL_INFO !== "false";
+  // Off unless explicitly asked for. This used to be `!== "false"`, which meant the
+  // footer was appended to every reply by default — and, because it was written into
+  // the assistant message before `done`, it was persisted and then replayed on later
+  // turns as if the model had written it. Opt-in keeps the transcript honest.
+  const showModelInfo = process.env.PI_DASHSCOPE_SHOW_MODEL_INFO === "true";
   try {
     if (fs.existsSync(WECHAT_CONFIG_PATH)) {
       const config = JSON.parse(fs.readFileSync(WECHAT_CONFIG_PATH, "utf8")) as {
@@ -275,16 +280,33 @@ function logUsage(model: string, inputTokens: number, outputTokens: number): voi
     usage[date][model].calls += 1;
     usage[date][model].inputTokens += inputTokens;
     usage[date][model].outputTokens += outputTokens;
-    fs.writeFileSync(USAGE_LOG_PATH, JSON.stringify(usage, null, 2));
-  } catch {
-    // Usage logging is best effort.
+    // Write to a sibling temp file and rename. `writeFileSync` truncates in place, so a
+    // crash or a second session writing concurrently can leave a half-written file; the
+    // next read then throws, and the bare catch below would leave `usage` as `{}` and
+    // overwrite the whole history with a single entry. rename() is atomic within a
+    // filesystem, so a reader either sees the old file or the new one.
+    const tmp = `${USAGE_LOG_PATH}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(usage, null, 2));
+    fs.renameSync(tmp, USAGE_LOG_PATH);
+  } catch (error) {
+    // Usage logging is best effort, but a silent total loss is worse than a loud skip:
+    // say so once per process rather than swallowing it entirely.
+    if (!warnedUsageWrite) {
+      warnedUsageWrite = true;
+      console.error(
+        `[pi-dashscope-native] usage log not written (${USAGE_LOG_PATH}): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 }
 
-function modelInfoFooter(modelId: string): string {
-  const name = QWEN_MODEL_MAP.get(modelId)?.name ?? modelId;
-  return `\n\n---\n模型: ${name} (Native)\nProvider: ${PROVIDER_ID}\n协议: DashScope Native API`;
-}
+/** 最近一次实际服务的模型 id,供状态栏展示(不写入消息) */
+let lastAssistantModelId: string | undefined;
+
+/** 只喊一次:用量日志写不进去时报一次,别刷屏 */
+let warnedUsageWrite = false;
 
 function nativeEndpoint(baseUrl: string, nativeApi: NativeApiKind): string {
   const path =
@@ -727,7 +749,9 @@ export function streamDashScopeNative(
     const finishToolCalls = () => {
       for (const { block, contentIndex, partialJson } of toolCalls.values()) {
         try {
-          block.arguments = partialJson ? JSON.parse(partialJson) as Record<string, unknown> : {};
+          // Pi 1.0.0 narrowed `ToolCall.arguments` from `Record<string, any>` to the
+          // closed `JsonObject` union, so the parsed value needs an explicit cast.
+          block.arguments = (partialJson ? JSON.parse(partialJson) : {}) as JsonObject;
         } catch {
           block.arguments = { _raw: partialJson };
         }
@@ -830,7 +854,7 @@ export function streamDashScopeNative(
           if (argumentDelta) {
             accumulator.partialJson += argumentDelta;
             try {
-              accumulator.block.arguments = JSON.parse(accumulator.partialJson) as Record<string, unknown>;
+              accumulator.block.arguments = JSON.parse(accumulator.partialJson) as JsonObject;
             } catch {
               // Arguments are commonly incomplete until the final tool-call chunk.
             }
@@ -866,11 +890,18 @@ export function streamDashScopeNative(
 
       endThinking();
       finishToolCalls();
-      if (integration.showModelInfo && output.stopReason !== "toolUse" && textIndex !== undefined) {
-        const footer = modelInfoFooter(model.id);
-        const block = output.content[textIndex] as TextContent;
-        block.text += footer;
-        stream.push({ type: "text_delta", contentIndex: textIndex, delta: footer, partial: output });
+      // The footer is display-only. Appending it to `output.content` here would fold it
+      // into the persisted assistant message and replay it as the model's own prior
+      // text on every later turn, inflating the transcript with a fabricated turn.
+      // `registerMarkdownTransformer` renders it without touching what is stored.
+      if (
+        integration.showModelInfo
+        && output.stopReason !== "toolUse"
+        && textIndex !== undefined
+      ) {
+        lastAssistantModelId = model.id;
+      } else {
+        lastAssistantModelId = undefined;
       }
       endText();
       calculateCost(model, output.usage);
@@ -911,6 +942,22 @@ export default function registerDashScopeNative(pi: ExtensionAPI): void {
     })),
     streamSimple: streamDashScopeNative,
   });
+
+  // 模型信息只在状态栏展示,不进消息内容。
+  // 之前是追加到助手消息文本上再 emit text_delta —— 那会把 footer 写进会话记录,
+  // 之后每一轮都作为“模型自己说过的话”重放。展示层的事不该落到会话里。
+  const integration = loadIntegrationConfig();
+  if (integration.showModelInfo) {
+    pi.on("message_end", (_event, ctx) => {
+      if (!lastAssistantModelId) return;
+      const name = QWEN_MODEL_MAP.get(lastAssistantModelId)?.name ?? lastAssistantModelId;
+      ctx.ui.setStatus("dashscope-native", `${name} · DashScope Native`);
+    });
+
+    pi.on("session_start", (_event, ctx) => {
+      ctx.ui.setStatus("dashscope-native", undefined);
+    });
+  }
 
   console.log(`[pi-dashscope-native] Registered ${QWEN_MODELS.length} Qwen 3.7+ models over DashScope Native API`);
 }
